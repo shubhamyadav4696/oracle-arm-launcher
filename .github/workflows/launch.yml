@@ -31,10 +31,12 @@ jobs:
         run: |
           COUNT=$(oci compute instance list -c "$COMPARTMENT" \
             --display-name trading-bot \
-            --query "data[?\"lifecycle-state\"!='TERMINATED'] | length(@)" \
-            --raw-output 2>/dev/null || echo 0)
-          echo "existing instances: $COUNT"
-          if [ "$COUNT" != "0" ]; then
+            --query "length(data[?\"lifecycle-state\"!='TERMINATED'])" \
+            --raw-output 2>/dev/null)
+          COUNT=$(printf '%s' "$COUNT" | tr -dc '0-9')   # strip to digits; empty -> 0
+          [ -z "$COUNT" ] && COUNT=0
+          echo "existing non-terminated instances: $COUNT"
+          if [ "$COUNT" -gt 0 ]; then
             echo "An instance already exists — nothing to launch."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
