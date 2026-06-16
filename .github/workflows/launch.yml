@@ -69,14 +69,21 @@ jobs:
               echo "::notice::SUCCESS — instance launched and RUNNING"
               echo "$OUT" | grep -iE '"id"|lifecycle-state' | head -5
               exit 0
-            elif echo "$OUT" | grep -qi "capacity"; then
-              echo "no capacity; retrying in 300s"
-              sleep 300
+            elif echo "$OUT" | grep -qiE "NotAuthenticated|NotAuthorized|401|403|InvalidParameter|can not be found|does not exist|LimitExceeded|QuotaExceeded"; then
+              # Genuinely fatal: bad creds / bad config / quota cap. Looping
+              # won't help — abort so we don't burn 6h of CI on broken setup.
+              echo "::error::Fatal (non-transient) failure — aborting:"; echo "$OUT" | tail -20
+              exit 1
             elif echo "$OUT" | grep -qiE "TooManyRequests|429|too many requests"; then
               echo "rate-limited (429) — backing off 300s and continuing"
               sleep 300
+            elif echo "$OUT" | grep -qi "capacity"; then
+              echo "no capacity; retrying in 300s"
+              sleep 300
             else
-              echo "::error::Non-capacity failure:"; echo "$OUT" | tail -20
-              exit 1
+              # Anything else (timeouts, connection drops, 5xx, transient
+              # network/service errors) — treat as transient and keep hunting.
+              echo "transient error; retrying in 120s:"; echo "$OUT" | tail -5
+              sleep 120
             fi
           done
