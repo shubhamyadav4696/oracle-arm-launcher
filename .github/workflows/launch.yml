@@ -70,8 +70,11 @@ jobs:
               echo "$OUT" | grep -iE '"id"|lifecycle-state' | head -5
               exit 0
             elif echo "$OUT" | grep -qi "capacity"; then
-              echo "no capacity; retrying in 120s"
-              sleep 120
+              echo "no capacity; retrying in 300s"
+              sleep 300
+            elif echo "$OUT" | grep -qiE "TooManyRequests|429|too many requests"; then
+              echo "rate-limited (429) — backing off 300s and continuing"
+              sleep 300
             else
               echo "::error::Non-capacity failure:"; echo "$OUT" | tail -20
               exit 1
