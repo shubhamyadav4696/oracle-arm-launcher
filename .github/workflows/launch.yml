@@ -1,17 +1,20 @@
 name: Launch Oracle ARM VM
 
-# Retries launching the Always-Free ARM instance until Oracle has capacity.
-# Runs on GitHub's servers, so your laptop can be off. Auto-skips once the
-# instance exists (no duplicates). Also runnable manually from the Actions tab.
+# Lands an Always-Free ARM instance the moment Oracle has capacity.
+# Each run LOOPS internally (retry every 2 min for ~5h50m) because GitHub's
+# scheduler fires unreliably — one long-running job covers the gaps. The
+# schedule restarts a fresh loop a few times a day. Skips if the instance
+# already exists (no duplicates). Runs on GitHub, so no local machine needed.
 
 on:
   schedule:
-    - cron: '*/30 * * * *'      # every ~30 min (GitHub may delay during peak)
+    - cron: '7 */6 * * *'        # ~every 6h; each run then loops for ~6h
   workflow_dispatch:
 
 jobs:
   launch:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     env:
       OCI_CLI_USER:        ${{ secrets.OCI_CLI_USER }}
       OCI_CLI_TENANCY:     ${{ secrets.OCI_CLI_TENANCY }}
@@ -26,47 +29,51 @@ jobs:
       - name: Install OCI CLI
         run: pip install --quiet oci-cli
 
-      - name: Skip if a trading-bot instance already exists
-        id: check
-        run: |
-          COUNT=$(oci compute instance list -c "$COMPARTMENT" \
-            --display-name trading-bot \
-            --query "length(data[?\"lifecycle-state\"!='TERMINATED'])" \
-            --raw-output 2>/dev/null)
-          COUNT=$(printf '%s' "$COUNT" | tr -dc '0-9')   # strip to digits; empty -> 0
-          [ -z "$COUNT" ] && COUNT=0
-          echo "existing non-terminated instances: $COUNT"
-          if [ "$COUNT" -gt 0 ]; then
-            echo "An instance already exists — nothing to launch."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Attempt launch
-        if: steps.check.outputs.skip == 'false'
+      - name: Retry-launch loop (~5h50m)
         run: |
           printf '%s\n' "${{ secrets.OCI_SSH_PUBKEY }}" > /tmp/id.pub
-          set +e
-          OUT=$(oci compute instance launch \
-            --availability-domain "$AD" \
-            --compartment-id "$COMPARTMENT" \
-            --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus":1,"memoryInGBs":6}' \
-            --image-id "$IMAGE" \
-            --subnet-id "$SUBNET" \
-            --assign-public-ip true \
-            --display-name "trading-bot" \
-            --ssh-authorized-keys-file /tmp/id.pub \
-            --wait-for-state RUNNING 2>&1)
-          CODE=$?
-          echo "$OUT"
-          if [ $CODE -eq 0 ]; then
-            echo "::notice::SUCCESS - instance launched and RUNNING"
-          elif echo "$OUT" | grep -qi "Out of host capacity\|capacity"; then
-            echo "::notice::No capacity this round - will retry next schedule"
-            exit 0
-          else
-            echo "::error::Launch failed (non-capacity reason - check log)"
-            exit 1
-          fi
+          START=$(date +%s)
+          MAX=21000          # 5h50m; exit before the 6h job timeout
+          n=0
+          while true; do
+            if [ $(( $(date +%s) - START )) -ge $MAX ]; then
+              echo "Time budget reached — next scheduled run will continue."; exit 0
+            fi
+            n=$((n+1))
+
+            COUNT=$(oci compute instance list -c "$COMPARTMENT" \
+              --display-name trading-bot \
+              --query "length(data[?\"lifecycle-state\"!='TERMINATED'])" \
+              --raw-output 2>/dev/null)
+            COUNT=$(printf '%s' "$COUNT" | tr -dc '0-9'); [ -z "$COUNT" ] && COUNT=0
+            if [ "$COUNT" -gt 0 ]; then
+              echo "::notice::Instance already exists — done."; exit 0
+            fi
+
+            echo "--- attempt $n ($(date -u '+%H:%M:%S') UTC) ---"
+            set +e
+            OUT=$(oci compute instance launch \
+              --availability-domain "$AD" \
+              --compartment-id "$COMPARTMENT" \
+              --shape "VM.Standard.A1.Flex" \
+              --shape-config '{"ocpus":1,"memoryInGBs":6}' \
+              --image-id "$IMAGE" \
+              --subnet-id "$SUBNET" \
+              --assign-public-ip true \
+              --display-name "trading-bot" \
+              --ssh-authorized-keys-file /tmp/id.pub \
+              --wait-for-state RUNNING 2>&1)
+            CODE=$?
+            set -e
+            if [ $CODE -eq 0 ]; then
+              echo "::notice::SUCCESS — instance launched and RUNNING"
+              echo "$OUT" | grep -iE '"id"|lifecycle-state' | head -5
+              exit 0
+            elif echo "$OUT" | grep -qi "capacity"; then
+              echo "no capacity; retrying in 120s"
+              sleep 120
+            else
+              echo "::error::Non-capacity failure:"; echo "$OUT" | tail -20
+              exit 1
+            fi
+          done
